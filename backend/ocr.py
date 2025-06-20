@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 # Load model and processor
 try:
     logger.info("Loading TrOCR model and processor...")
-    processor = TrOCRProcessor.from_pretrained("trocr_invoice")
-    model = VisionEncoderDecoderModel.from_pretrained("trocr_invoice")
+    processor = TrOCRProcessor.from_pretrained("trocr_invoice/checkpoint-900")
+    model = VisionEncoderDecoderModel.from_pretrained("trocr_invoice/checkpoint-900")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     logger.info(f"Model loaded successfully on device: {device}")
