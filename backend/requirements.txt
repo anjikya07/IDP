@@ -1,10 +1,9 @@
 flask
-opencv-python
-numpy
-pytesseract
 flask-cors
 torch
 transformers
 Pillow
-
-
+opencv-python
+numpy
+pytesseract
+requests
