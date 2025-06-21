@@ -2,9 +2,9 @@ import logging
 import os
 import zipfile
 import requests
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+import subprocess
+import sys
 from PIL import Image
-import torch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +18,35 @@ DOWNLOAD_URL = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
 processor = None
 model = None
 device = None
+dependencies_installed = False
+
+def install_ml_dependencies():
+    """Install ML dependencies only when needed"""
+    global dependencies_installed
+    
+    if dependencies_installed:
+        return
+        
+    try:
+        logger.info("Installing ML dependencies...")
+        
+        # Install PyTorch CPU version (much smaller)
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "torch", "--index-url", "https://download.pytorch.org/whl/cpu"
+        ])
+        
+        # Install transformers
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "transformers"
+        ])
+        
+        dependencies_installed = True
+        logger.info("ML dependencies installed successfully")
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to install dependencies: {e}")
+        raise RuntimeError(f"Dependency installation failed: {e}")
 
 def download_model():
     if not os.path.exists(MODEL_DIR):
@@ -25,11 +54,23 @@ def download_model():
             os.makedirs("trocr_invoice", exist_ok=True)
             logger.info("Downloading model from Google Drive...")
             
-            with requests.get(DOWNLOAD_URL, stream=True, timeout=300) as r:
-                r.raise_for_status()
+            # Use session for better connection handling
+            with requests.Session() as session:
+                response = session.get(DOWNLOAD_URL, stream=True, timeout=300)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
                 with open(ZIP_PATH, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                if downloaded % (1024 * 1024 * 100) == 0:  # Log every 100MB
+                                    logger.info(f"Downloaded {percent:.1f}%")
                         
             logger.info("Download complete. Extracting...")
             with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
@@ -56,6 +97,13 @@ def load_model():
     
     if processor is None or model is None:
         try:
+            # First install dependencies
+            install_ml_dependencies()
+            
+            # Now import the libraries (after installation)
+            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+            import torch
+            
             logger.info("Loading OCR model...")
             download_model()  # Download if not exists
             
@@ -85,6 +133,9 @@ def extract_text(filepath):
     try:
         # Load model only when first needed
         load_model()
+        
+        # Import torch here (after installation)
+        import torch
         
         # Validate file exists
         if not os.path.exists(filepath):
