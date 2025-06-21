@@ -9,3 +9,5 @@ pytesseract
 requests
 gunicorn
 gdown>=4.7.1
+huggingface_hub
+psutil
