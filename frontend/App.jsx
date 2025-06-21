@@ -1,4 +1,4 @@
-// App.jsx
+// App.jsx - Corrected Version
 import React, { useState } from "react";
 
 function App() {
@@ -46,18 +46,23 @@ function App() {
     setLoading(true);
     setFields(null);
 
-const API_URL = process.env.REACT_APP_API_BASE || "http://localhost:5000";
+    try {  
+      const API_URL = process.env.REACT_APP_API_BASE || "http://localhost:5000";
 
-const response = await fetch(`${API_URL}/api/process`, {
-  method: "POST",
-  body: formData,
-});
+      const response = await fetch(`${API_URL}/api/process`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {  
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
       const data = await response.json();
       setFields(data.extracted_fields || {});
     } catch (err) {
       console.error(err);
-      alert("Failed to connect to backend.");
+      alert("Failed to connect to backend: " + err.message);  
     } finally {
       setLoading(false);
     }
