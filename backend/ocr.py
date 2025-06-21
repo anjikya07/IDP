@@ -14,6 +14,11 @@ ZIP_PATH = "trocr_invoice/final_model.zip"
 DRIVE_FILE_ID = "1-mNc5xS1vb-0VLMuNcP4ehxZ2d6rezdO"
 DOWNLOAD_URL = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
 
+# Global variables for lazy loading
+processor = None
+model = None
+device = None
+
 def download_model():
     if not os.path.exists(MODEL_DIR):
         try:
@@ -31,6 +36,10 @@ def download_model():
                 zip_ref.extractall("trocr_invoice")
             logger.info("Extraction complete.")
             
+            # Clean up zip file
+            if os.path.exists(ZIP_PATH):
+                os.remove(ZIP_PATH)
+                
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to download model: {e}")
             raise RuntimeError(f"Model download failed: {e}")
@@ -41,17 +50,24 @@ def download_model():
             logger.error(f"Unexpected error during model setup: {e}")
             raise RuntimeError(f"Model setup failed: {e}")
 
-# Download and load model
-try:
-    download_model()
-    processor = TrOCRProcessor.from_pretrained(MODEL_DIR)
-    model = VisionEncoderDecoderModel.from_pretrained(MODEL_DIR)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    logger.info(f"Model loaded successfully on {device}")
-except Exception as e:
-    logger.error(f"Failed to load model: {e}")
-    raise RuntimeError(f"Model initialization failed: {e}")
+def load_model():
+    """Load model only when needed (lazy loading)"""
+    global processor, model, device
+    
+    if processor is None or model is None:
+        try:
+            logger.info("Loading OCR model...")
+            download_model()  # Download if not exists
+            
+            processor = TrOCRProcessor.from_pretrained(MODEL_DIR)
+            model = VisionEncoderDecoderModel.from_pretrained(MODEL_DIR)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+            logger.info(f"Model loaded successfully on {device}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise RuntimeError(f"Model initialization failed: {e}")
 
 def extract_text(filepath):
     """
@@ -67,6 +83,9 @@ def extract_text(filepath):
         RuntimeError: If OCR processing fails
     """
     try:
+        # Load model only when first needed
+        load_model()
+        
         # Validate file exists
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"File not found: {filepath}")
