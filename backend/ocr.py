@@ -6,11 +6,12 @@ import subprocess
 import sys
 from PIL import Image
 import time
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = "final_model"
+MODEL_DIR = "final_model"   
 ZIP_PATH = "final_model.zip"
 DRIVE_FILE_ID = "1-mNc5xS1vb-0VLMuNcP4ehxZ2d6rezdO"
 DOWNLOAD_URL = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
@@ -48,6 +49,13 @@ def install_ml_dependencies():
         ])
         logger.info("Transformers installation completed")
         
+        # Install gdown for Google Drive downloads
+        logger.info("Installing gdown...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "gdown"
+        ])
+        logger.info("gdown installation completed")
+        
         dependencies_installed = True
         elapsed = time.time() - start_time
         logger.info(f"ML dependencies installed successfully in {elapsed:.2f} seconds")
@@ -56,8 +64,119 @@ def install_ml_dependencies():
         logger.error(f"Failed to install dependencies: {e}")
         raise RuntimeError(f"Dependency installation failed: {e}")
 
+def download_with_gdown():
+    """Download using gdown library which handles Google Drive better"""
+    try:
+        logger.info("Attempting download with gdown library...")
+        import gdown
+        
+        # gdown can handle the Google Drive virus scan warning
+        url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+        gdown.download(url, ZIP_PATH, quiet=False)
+        
+        # Validate the downloaded file
+        if os.path.exists(ZIP_PATH):
+            file_size = os.path.getsize(ZIP_PATH)
+            logger.info(f"gdown download successful, file size: {file_size} bytes")
+            
+            if file_size < 1024 * 1024:  # Less than 1MB
+                logger.error(f"Downloaded file too small ({file_size} bytes)")
+                return False
+                
+            # Test if it's a valid zip file
+            try:
+                with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+                    file_list = zip_ref.namelist()
+                    logger.info(f"Zip file validated - contains {len(file_list)} files")
+                return True
+            except zipfile.BadZipFile:
+                logger.error("Downloaded file is not a valid zip")
+                return False
+        else:
+            logger.error("gdown failed - file not created")
+            return False
+            
+    except ImportError:
+        logger.error("gdown not available")
+        return False
+    except Exception as e:
+        logger.error(f"gdown method failed: {e}")
+        return False
+
+def download_with_session_bypass():
+    """Attempt to bypass Google Drive virus scan using session cookies"""
+    try:
+        session = requests.Session()
+        
+        # First, get the initial page to extract confirmation token
+        logger.info("Getting initial page for confirmation token...")
+        response = session.get(f'https://drive.google.com/uc?id={DRIVE_FILE_ID}')
+        
+        # Look for confirmation token in various places
+        confirm_token = None
+        
+        # Method 1: Look for confirm parameter in forms
+        confirm_match = re.search(r'name="confirm"\s+value="([^"]+)"', response.text)
+        if confirm_match:
+            confirm_token = confirm_match.group(1)
+            logger.info(f"Found confirmation token in form: {confirm_token}")
+        
+        # Method 2: Look for confirm in download links
+        if not confirm_token:
+            confirm_match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
+            if confirm_match:
+                confirm_token = confirm_match.group(1)
+                logger.info(f"Found confirmation token in link: {confirm_token}")
+        
+        # Method 3: Try common confirmation tokens
+        if not confirm_token:
+            for token in ['t', '1', 'yes']:
+                logger.info(f"Trying confirmation token: {token}")
+                test_response = session.head(
+                    f'https://drive.google.com/uc?export=download&id={DRIVE_FILE_ID}&confirm={token}'
+                )
+                content_type = test_response.headers.get('content-type', '')
+                if not content_type.startswith('text/html'):
+                    confirm_token = token
+                    logger.info(f"Working confirmation token found: {token}")
+                    break
+        
+        if not confirm_token:
+            logger.warning("No confirmation token found, trying without one...")
+            confirm_token = 't'  # Default fallback
+        
+        # Download with confirmation token
+        download_url = f'https://drive.google.com/uc?export=download&id={DRIVE_FILE_ID}&confirm={confirm_token}'
+        logger.info(f"Downloading with confirmation: {download_url}")
+        
+        response = session.get(download_url, stream=True, timeout=600)
+        
+        # Check if we're still getting HTML
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' in content_type:
+            logger.error("Still receiving HTML page after confirmation attempt")
+            return False
+        
+        # Download the file
+        total_size = int(response.headers.get('content-length', 0))
+        logger.info(f"Starting download, size: {total_size} bytes")
+        
+        with open(ZIP_PATH, 'wb') as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+        
+        logger.info(f"Session bypass download completed: {downloaded} bytes")
+        return downloaded > 1024 * 1024  # Must be at least 1MB
+        
+    except Exception as e:
+        logger.error(f"Session bypass method failed: {e}")
+        return False
+
 def download_model():
-    """Download model with better error handling and validation"""
+    """Download model with enhanced Google Drive bypass methods"""
     if os.path.exists(MODEL_DIR):
         logger.info(f"Model directory already exists: {MODEL_DIR}")
         return
@@ -66,30 +185,72 @@ def download_model():
         logger.info("=== STARTING MODEL DOWNLOAD ===")
         os.makedirs("trocr_invoice", exist_ok=True)
         
-        # Try multiple download URLs
-        download_urls = [
-            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&export=download",
-            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&confirm=t",
-            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
-        ]
+        # Method 1: Try gdown first (most reliable for Google Drive)
+        if download_with_gdown():
+            logger.info("Successfully downloaded using gdown")
+        else:
+            # Method 2: Try session-based bypass
+            logger.info("gdown failed, trying session bypass...")
+            if download_with_session_bypass():
+                logger.info("Successfully downloaded using session bypass")
+            else:
+                # Method 3: Try original methods as fallback
+                logger.info("Session bypass failed, trying original methods...")
+                download_urls = [
+                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&export=download",
+                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&confirm=t",
+                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+                ]
+                
+                success = False
+                for i, url in enumerate(download_urls):
+                    try:
+                        logger.info(f"Attempting original method {i+1}: {url}")
+                        if _attempt_download(url):
+                            success = True
+                            break
+                    except Exception as e:
+                        logger.warning(f"Original method {i+1} failed: {e}")
+                
+                if not success:
+                    raise RuntimeError("All download methods failed")
         
-        for i, url in enumerate(download_urls):
-            try:
-                logger.info(f"Attempting download method {i+1}: {url}")
-                success = _attempt_download(url)
-                if success:
-                    break
-            except Exception as e:
-                logger.warning(f"Download method {i+1} failed: {e}")
-                if i == len(download_urls) - 1:  # Last attempt
-                    raise
-                    
+        # Extract the model
+        logger.info("Starting extraction...")
+        extract_start = time.time()
+        
+        with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            logger.info(f"Extracting {len(file_list)} files...")
+            zip_ref.extractall("trocr_invoice")
+        
+        extract_time = time.time() - extract_start
+        logger.info(f"Extraction complete in {extract_time:.2f} seconds")
+        
+        # Verify extraction
+        if os.path.exists(MODEL_DIR):
+            model_files = os.listdir(MODEL_DIR)
+            logger.info(f"Model directory created with {len(model_files)} files: {model_files}")
+        else:
+            logger.error(f"Model directory not found after extraction: {MODEL_DIR}")
+            raise RuntimeError("Model extraction failed - directory not created")
+        
+        # Clean up zip file
+        if os.path.exists(ZIP_PATH):
+            os.remove(ZIP_PATH)
+            logger.info("Cleanup: zip file removed")
+        
+        logger.info("=== MODEL DOWNLOAD COMPLETED ===")
+        
     except Exception as e:
-        logger.error(f"All download methods failed: {e}")
+        logger.error(f"Model download failed: {e}")
+        # Clean up partial download
+        if os.path.exists(ZIP_PATH):
+            os.remove(ZIP_PATH)
         raise RuntimeError(f"Model download failed: {e}")
 
 def _attempt_download(url):
-    """Attempt to download from a specific URL"""
+    """Attempt to download from a specific URL (original method)"""
     start_time = time.time()
     
     with requests.Session() as session:
@@ -160,32 +321,7 @@ def _attempt_download(url):
             logger.error(f"File content preview: {content_preview}")
         raise RuntimeError(f"Downloaded file is not a valid zip file: {e}")
     
-    # Extract the model
-    logger.info("Starting extraction...")
-    extract_start = time.time()
-    
-    with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
-        file_list = zip_ref.namelist()
-        logger.info(f"Extracting {len(file_list)} files...")
-        zip_ref.extractall("trocr_invoice")
-    
-    extract_time = time.time() - extract_start
-    logger.info(f"Extraction complete in {extract_time:.2f} seconds")
-    
-    # Verify extraction
-    if os.path.exists(MODEL_DIR):
-        model_files = os.listdir(MODEL_DIR)
-        logger.info(f"Model directory created with {len(model_files)} files: {model_files}")
-    else:
-        logger.error(f"Model directory not found after extraction: {MODEL_DIR}")
-        raise RuntimeError("Model extraction failed - directory not created")
-    
-    # Clean up zip file
-    if os.path.exists(ZIP_PATH):
-        os.remove(ZIP_PATH)
-        logger.info("Cleanup: zip file removed")
-    
-    logger.info("=== MODEL DOWNLOAD COMPLETED ===")
+    logger.info("=== DOWNLOAD METHOD SUCCESSFUL ===")
     return True
 
 def load_model():
