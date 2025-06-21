@@ -10,8 +10,8 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = "trocr_invoice/final_model"
-ZIP_PATH = "trocr_invoice/final_model.zip"
+MODEL_DIR = "final_model"
+ZIP_PATH = "final_model.zip"
 DRIVE_FILE_ID = "1-mNc5xS1vb-0VLMuNcP4ehxZ2d6rezdO"
 DOWNLOAD_URL = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
 
