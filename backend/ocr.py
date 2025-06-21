@@ -1,23 +1,20 @@
 import logging
 import os
-import zipfile
-import requests
 import subprocess
 import sys
 from PIL import Image
 import time
-import re
 import tempfile
-import shutil
 import gc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = "final_model"   
-ZIP_PATH = "final_model.zip"
-DRIVE_FILE_ID = "1-mNc5xS1vb-0VLMuNcP4ehxZ2d6rezdO"
-DOWNLOAD_URL = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+# Hugging Face model configuration
+HF_USERNAME = "anjikya07"
+HF_MODEL_NAME = "trocr_model"
+HF_TOKEN = "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"
+HF_MODEL_ID = f"{HF_USERNAME}/{HF_MODEL_NAME}"
 
 # Global variables for lazy loading
 processor = None
@@ -62,12 +59,12 @@ def install_ml_dependencies():
         ])
         logger.info("Transformers installation completed")
         
-        # Install gdown for Google Drive downloads
-        logger.info("Installing gdown...")
+        # Install huggingface_hub for authentication
+        logger.info("Installing huggingface_hub...")
         subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "gdown"
+            sys.executable, "-m", "pip", "install", "huggingface_hub"
         ])
-        logger.info("gdown installation completed")
+        logger.info("huggingface_hub installation completed")
         
         # Install psutil for memory monitoring
         try:
@@ -86,415 +83,20 @@ def install_ml_dependencies():
         logger.error(f"Failed to install dependencies: {e}")
         raise RuntimeError(f"Dependency installation failed: {e}")
 
-def extract_zip_ultra_conservative(zip_path, extract_path, max_memory_mb=300):
-    """
-    Ultra-conservative zip extraction with external process isolation
-    Uses minimal memory by processing one file at a time with cleanup
-    """
-    logger.info(f"Starting ultra-conservative extraction to {extract_path}")
-    logger.info(f"Memory limit: {max_memory_mb}MB")
-    
-    os.makedirs(extract_path, exist_ok=True)
-    extracted_files = 0
-    
+def setup_huggingface_auth():
+    """Setup Hugging Face authentication"""
     try:
-        # First, get file list with minimal memory usage
-        file_list = []
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            file_list = [info for info in zip_ref.infolist() if not info.is_dir()]
-        
-        total_files = len(file_list)
-        logger.info(f"Zip contains {total_files} files to extract")
-        
-        # Process files one by one with aggressive memory management
-        for i, file_info in enumerate(file_list):
-            try:
-                # Monitor memory before each file
-                current_memory = get_memory_usage()
-                if current_memory and current_memory > max_memory_mb:
-                    logger.warning(f"Memory usage high before file {i+1}: {current_memory:.1f}MB")
-                    # Force aggressive cleanup
-                    gc.collect()
-                    time.sleep(0.1)  # Brief pause for memory cleanup
-                
-                logger.info(f"Extracting file {i+1}/{total_files}: {file_info.filename}")
-                
-                # Create target directory if needed
-                target_path = os.path.join(extract_path, file_info.filename)
-                target_dir = os.path.dirname(target_path)
-                if target_dir:
-                    os.makedirs(target_dir, exist_ok=True)
-                
-                # Open zip file fresh for each file to minimize memory
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    # Use very small chunks and immediate cleanup
-                    with zip_ref.open(file_info) as source:
-                        with open(target_path, 'wb') as target:
-                            chunk_size = 4096  # Even smaller 4KB chunks
-                            chunks_processed = 0
-                            
-                            while True:
-                                try:
-                                    chunk = source.read(chunk_size)
-                                    if not chunk:
-                                        break
-                                    target.write(chunk)
-                                    chunks_processed += 1
-                                    
-                                    # Aggressive memory monitoring during large files
-                                    if chunks_processed % 100 == 0:  # Every ~400KB
-                                        current_memory = get_memory_usage()
-                                        if current_memory and current_memory > max_memory_mb:
-                                            logger.warning(f"Memory spike during extraction: {current_memory:.1f}MB")
-                                            gc.collect()
-                                            
-                                except MemoryError:
-                                    logger.error(f"Memory error during {file_info.filename}")
-                                    raise
-                
-                extracted_files += 1
-                
-                # Cleanup after each file
-                if extracted_files % 5 == 0:  # More frequent cleanup
-                    gc.collect()
-                    logger.info(f"Extracted {extracted_files}/{total_files} files")
-                    
-            except Exception as e:
-                logger.error(f"Failed to extract {file_info.filename}: {e}")
-                # Continue with other files, but log the error
-                continue
-        
-        logger.info(f"Ultra-conservative extraction completed: {extracted_files}/{total_files} files")
-        return extracted_files > 0
-        
+        from huggingface_hub import login
+        logger.info("Setting up Hugging Face authentication...")
+        login(token=HF_TOKEN)
+        logger.info("Hugging Face authentication successful")
+        return True
     except Exception as e:
-        logger.error(f"Ultra-conservative extraction failed: {e}")
+        logger.error(f"Hugging Face authentication failed: {e}")
         return False
-
-def try_system_unzip(zip_path, extract_path):
-    """
-    Try to use system unzip command if available (more memory efficient)
-    """
-    try:
-        logger.info("Attempting system unzip command...")
-        result = subprocess.run([
-            'unzip', '-q', zip_path, '-d', extract_path
-        ], capture_output=True, text=True, timeout=300)
-        
-        if result.returncode == 0:
-            logger.info("System unzip successful")
-            return True
-        else:
-            logger.warning(f"System unzip failed: {result.stderr}")
-            return False
-            
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
-        logger.warning(f"System unzip not available or failed: {e}")
-        return False
-
-def download_with_gdown():
-    """Download using gdown library which handles Google Drive better"""
-    try:
-        logger.info("Attempting download with gdown library...")
-        import gdown
-        
-        # gdown can handle the Google Drive virus scan warning
-        url = f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
-        gdown.download(url, ZIP_PATH, quiet=False)
-        
-        # Validate the downloaded file
-        if os.path.exists(ZIP_PATH):
-            file_size = os.path.getsize(ZIP_PATH)
-            logger.info(f"gdown download successful, file size: {file_size} bytes")
-            
-            if file_size < 1024 * 1024:  # Less than 1MB
-                logger.error(f"Downloaded file too small ({file_size} bytes)")
-                return False
-                
-            # Test if it's a valid zip file
-            try:
-                with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
-                    file_list = zip_ref.namelist()
-                    logger.info(f"Zip file validated - contains {len(file_list)} files")
-                return True
-            except zipfile.BadZipFile:
-                logger.error("Downloaded file is not a valid zip")
-                return False
-        else:
-            logger.error("gdown failed - file not created")
-            return False
-            
-    except ImportError:
-        logger.error("gdown not available")
-        return False
-    except Exception as e:
-        logger.error(f"gdown method failed: {e}")
-        return False
-
-def download_with_session_bypass():
-    """Attempt to bypass Google Drive virus scan using session cookies"""
-    try:
-        session = requests.Session()
-        
-        # First, get the initial page to extract confirmation token
-        logger.info("Getting initial page for confirmation token...")
-        response = session.get(f'https://drive.google.com/uc?id={DRIVE_FILE_ID}')
-        
-        # Look for confirmation token in various places
-        confirm_token = None
-        
-        # Method 1: Look for confirm parameter in forms
-        confirm_match = re.search(r'name="confirm"\s+value="([^"]+)"', response.text)
-        if confirm_match:
-            confirm_token = confirm_match.group(1)
-            logger.info(f"Found confirmation token in form: {confirm_token}")
-        
-        # Method 2: Look for confirm in download links
-        if not confirm_token:
-            confirm_match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
-            if confirm_match:
-                confirm_token = confirm_match.group(1)
-                logger.info(f"Found confirmation token in link: {confirm_token}")
-        
-        # Method 3: Try common confirmation tokens
-        if not confirm_token:
-            for token in ['t', '1', 'yes']:
-                logger.info(f"Trying confirmation token: {token}")
-                test_response = session.head(
-                    f'https://drive.google.com/uc?export=download&id={DRIVE_FILE_ID}&confirm={token}'
-                )
-                content_type = test_response.headers.get('content-type', '')
-                if not content_type.startswith('text/html'):
-                    confirm_token = token
-                    logger.info(f"Working confirmation token found: {token}")
-                    break
-        
-        if not confirm_token:
-            logger.warning("No confirmation token found, trying without one...")
-            confirm_token = 't'  # Default fallback
-        
-        # Download with confirmation token
-        download_url = f'https://drive.google.com/uc?export=download&id={DRIVE_FILE_ID}&confirm={confirm_token}'
-        logger.info(f"Downloading with confirmation: {download_url}")
-        
-        response = session.get(download_url, stream=True, timeout=600)
-        
-        # Check if we're still getting HTML
-        content_type = response.headers.get('content-type', '').lower()
-        if 'text/html' in content_type:
-            logger.error("Still receiving HTML page after confirmation attempt")
-            return False
-        
-        # Download the file with streaming to avoid memory issues
-        total_size = int(response.headers.get('content-length', 0))
-        logger.info(f"Starting streaming download, size: {total_size} bytes")
-        
-        with open(ZIP_PATH, 'wb') as f:
-            downloaded = 0
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Monitor memory during download
-                    current_memory = get_memory_usage()
-                    if current_memory and current_memory > 400:  # 400MB limit
-                        logger.warning(f"High memory usage during download: {current_memory:.1f}MB")
-        
-        logger.info(f"Session bypass download completed: {downloaded} bytes")
-        return downloaded > 1024 * 1024  # Must be at least 1MB
-        
-    except Exception as e:
-        logger.error(f"Session bypass method failed: {e}")
-        return False
-
-def download_model():
-    """Download model with enhanced memory management"""
-    if os.path.exists(MODEL_DIR):
-        logger.info(f"Model directory already exists: {MODEL_DIR}")
-        return
-        
-    try:
-        logger.info("=== STARTING MODEL DOWNLOAD ===")
-        
-        # Monitor initial memory
-        initial_memory = get_memory_usage()
-        if initial_memory:
-            logger.info(f"Initial memory usage: {initial_memory:.1f}MB")
-        
-        os.makedirs("trocr_invoice", exist_ok=True)
-        
-        # Method 1: Try gdown first (most reliable for Google Drive)
-        download_success = False
-        if download_with_gdown():
-            logger.info("Successfully downloaded using gdown")
-            download_success = True
-        else:
-            # Method 2: Try session-based bypass
-            logger.info("gdown failed, trying session bypass...")
-            if download_with_session_bypass():
-                logger.info("Successfully downloaded using session bypass")
-                download_success = True
-            else:
-                # Method 3: Try original methods as fallback
-                logger.info("Session bypass failed, trying original methods...")
-                download_urls = [
-                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&export=download",
-                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&confirm=t",
-                    f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
-                ]
-                
-                for i, url in enumerate(download_urls):
-                    try:
-                        logger.info(f"Attempting original method {i+1}: {url}")
-                        if _attempt_download(url):
-                            download_success = True
-                            break
-                    except Exception as e:
-                        logger.warning(f"Original method {i+1} failed: {e}")
-        
-        if not download_success:
-            raise RuntimeError("All download methods failed")
-        
-        # Check memory before extraction
-        pre_extract_memory = get_memory_usage()
-        if pre_extract_memory:
-            logger.info(f"Memory usage before extraction: {pre_extract_memory:.1f}MB")
-        
-        # Try multiple extraction methods in order of preference
-        logger.info("Starting memory-optimized extraction...")
-        extract_start = time.time()
-        
-        extraction_successful = False
-        
-        # Method 1: Try system unzip if available (most memory efficient)
-        if try_system_unzip(ZIP_PATH, "trocr_invoice"):
-            extraction_successful = True
-            logger.info("Extraction successful using system unzip")
-        else:
-            # Method 2: Ultra-conservative Python extraction
-            logger.info("System unzip failed, trying ultra-conservative Python extraction...")
-            if extract_zip_ultra_conservative(ZIP_PATH, "trocr_invoice"):
-                extraction_successful = True
-                logger.info("Extraction successful using ultra-conservative method")
-            else:
-                # Method 3: Last resort - try to extract just essential files
-                logger.warning("Ultra-conservative extraction failed, trying selective extraction...")
-                extraction_successful = extract_essential_files_only(ZIP_PATH, "trocr_invoice")
-        
-        if not extraction_successful:
-            raise RuntimeError("All extraction methods failed - model file may be too large for available memory")
-        
-        extract_time = time.time() - extract_start
-        logger.info(f"Extraction complete in {extract_time:.2f} seconds")
-        
-        # Check memory after extraction
-        post_extract_memory = get_memory_usage()
-        if post_extract_memory:
-            logger.info(f"Memory usage after extraction: {post_extract_memory:.1f}MB")
-        
-        # Verify extraction
-        if os.path.exists(MODEL_DIR):
-            model_files = os.listdir(MODEL_DIR)
-            logger.info(f"Model directory created with {len(model_files)} files: {model_files}")
-        else:
-            logger.error(f"Model directory not found after extraction: {MODEL_DIR}")
-            raise RuntimeError("Model extraction failed - directory not created")
-        
-        # Clean up zip file to free memory
-        if os.path.exists(ZIP_PATH):
-            os.remove(ZIP_PATH)
-            logger.info("Cleanup: zip file removed")
-            # Force garbage collection after cleanup
-            gc.collect()
-        
-        # Final memory check
-        final_memory = get_memory_usage()
-        if final_memory:
-            logger.info(f"Final memory usage: {final_memory:.1f}MB")
-        
-        logger.info("=== MODEL DOWNLOAD COMPLETED ===")
-        
-    except Exception as e:
-        logger.error(f"Model download failed: {e}")
-        # Clean up partial download
-        if os.path.exists(ZIP_PATH):
-            os.remove(ZIP_PATH)
-        raise RuntimeError(f"Model download failed: {e}")
-
-def _attempt_download(url):
-    """Attempt to download from a specific URL with memory optimization"""
-    start_time = time.time()
-    
-    with requests.Session() as session:
-        logger.info(f"Making request to: {url}")
-        response = session.get(url, stream=True, timeout=600)
-        
-        if response.status_code != 200:
-            logger.error(f"Download failed with status code: {response.status_code}")
-            raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
-        
-        # Check if we got an HTML page (common with Google Drive errors)
-        content_type = response.headers.get('content-type', '').lower()
-        if 'text/html' in content_type:
-            logger.error("Received HTML page instead of file - likely a Google Drive error page")
-            raise requests.exceptions.RequestException("Received HTML instead of file")
-        
-        total_size = int(response.headers.get('content-length', 0))
-        logger.info(f"Download started, total size: {total_size} bytes ({total_size/1024/1024:.1f} MB)")
-        
-        # Validate file size (ML models should be at least 1MB)
-        if total_size < 1024 * 1024:  # Less than 1MB
-            logger.warning(f"File size suspiciously small: {total_size} bytes")
-        
-        downloaded = 0
-        chunk_count = 0
-        
-        with open(ZIP_PATH, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    chunk_count += 1
-                    
-                    # Monitor memory during download
-                    if chunk_count % 1000 == 0:  # Check every ~8MB
-                        current_memory = get_memory_usage()
-                        if current_memory and current_memory > 400:  # 400MB limit
-                            logger.warning(f"High memory usage: {current_memory:.1f}MB")
-                            gc.collect()  # Force garbage collection
-                    
-                    # Log progress every 10MB
-                    if chunk_count % 1280 == 0:
-                        if total_size > 0:
-                            percent = (downloaded / total_size) * 100
-                            logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB ({percent:.1f}%)")
-                        else:
-                            logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB")
-    
-    download_time = time.time() - start_time
-    actual_size = os.path.getsize(ZIP_PATH)
-    logger.info(f"Download complete in {download_time:.2f} seconds. File size: {actual_size} bytes")
-    
-    # Validate the downloaded file
-    if actual_size < 1024 * 1024:  # Less than 1MB
-        logger.error(f"Downloaded file too small ({actual_size} bytes)")
-        raise RuntimeError("Downloaded file appears to be corrupted or incorrect")
-    
-    # Test if it's actually a zip file
-    try:
-        with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
-            file_list = zip_ref.namelist()
-            logger.info(f"Zip file validated - contains {len(file_list)} files")
-    except zipfile.BadZipFile as e:
-        logger.error(f"Downloaded file is not a valid zip: {e}")
-        raise RuntimeError(f"Downloaded file is not a valid zip file: {e}")
-    
-    logger.info("=== DOWNLOAD METHOD SUCCESSFUL ===")
-    return True
 
 def load_model():
-    """Load model only when needed with memory optimization"""
+    """Load model from Hugging Face with memory optimization"""
     global processor, model, device
     
     if processor is not None and model is not None:
@@ -502,7 +104,7 @@ def load_model():
         return
         
     try:
-        logger.info("=== STARTING MODEL LOADING ===")
+        logger.info("=== STARTING MODEL LOADING FROM HUGGING FACE ===")
         start_time = time.time()
         
         # Monitor initial memory
@@ -513,19 +115,30 @@ def load_model():
         # First install dependencies
         install_ml_dependencies()
         
+        # Setup Hugging Face authentication
+        if not setup_huggingface_auth():
+            logger.warning("Authentication failed, trying without authentication...")
+        
         # Now import the libraries (after installation)
         logger.info("Importing ML libraries...")
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
         import torch
         logger.info("ML libraries imported successfully")
         
-        # Download model if needed
-        download_model()
-        
         # Load processor with memory monitoring
-        logger.info("Loading processor...")
+        logger.info(f"Loading processor from Hugging Face model: {HF_MODEL_ID}")
         processor_start = time.time()
-        processor = TrOCRProcessor.from_pretrained(MODEL_DIR)
+        try:
+            processor = TrOCRProcessor.from_pretrained(
+                HF_MODEL_ID,
+                use_auth_token=HF_TOKEN,
+                cache_dir=None  # Use default cache
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load custom processor, trying base TrOCR processor: {e}")
+            # Fallback to base TrOCR processor if custom one fails
+            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
+        
         processor_time = time.time() - processor_start
         
         processor_memory = get_memory_usage()
@@ -535,15 +148,17 @@ def load_model():
             logger.info(f"Processor loaded in {processor_time:.2f} seconds")
         
         # Load model with memory optimization
-        logger.info("Loading model with memory optimization...")
+        logger.info(f"Loading model from Hugging Face: {HF_MODEL_ID}")
         model_start = time.time()
         
         # Use lower precision and memory optimization
         model = VisionEncoderDecoderModel.from_pretrained(
-            MODEL_DIR,
+            HF_MODEL_ID,
+            use_auth_token=HF_TOKEN,
             torch_dtype=torch.float32,
             low_cpu_mem_usage=True,
-            device_map=None  # Don't auto-assign device
+            device_map=None,  # Don't auto-assign device
+            cache_dir=None  # Use default cache
         )
         
         model_time = time.time() - model_start
@@ -570,12 +185,34 @@ def load_model():
             logger.info(f"Model moved to device: {device}")
         
         total_time = time.time() - start_time
-        logger.info(f"=== MODEL LOADING COMPLETED in {total_time:.2f} seconds ===")
+        logger.info(f"=== MODEL LOADING FROM HUGGING FACE COMPLETED in {total_time:.2f} seconds ===")
         
     except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
+        logger.error(f"Failed to load model from Hugging Face: {str(e)}")
         logger.exception("Full model loading traceback:")
-        raise RuntimeError(f"Model initialization failed: {str(e)}")
+        
+        # Try fallback to base TrOCR model
+        logger.info("Attempting fallback to base TrOCR model...")
+        try:
+            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+            import torch
+            
+            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
+            model = VisionEncoderDecoderModel.from_pretrained(
+                "microsoft/trocr-base-printed",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                device_map=None
+            )
+            device = torch.device("cpu")
+            model.to(device)
+            model.eval()
+            
+            logger.info("Fallback to base TrOCR model successful")
+            
+        except Exception as fallback_error:
+            logger.error(f"Fallback model loading also failed: {str(fallback_error)}")
+            raise RuntimeError(f"Model initialization failed: {str(e)}")
 
 def extract_text(filepath):
     """
@@ -724,3 +361,21 @@ def extract_text(filepath):
             raise e
         else:
             raise RuntimeError(f"OCR failed: {str(e)}")
+
+# Example usage function
+def main():
+    """Example usage of the OCR system"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='OCR Text Extraction')
+    parser.add_argument('image_path', help='Path to the image file')
+    args = parser.parse_args()
+    
+    try:
+        extracted_text = extract_text(args.image_path)
+        print(f"\nExtracted Text:\n{extracted_text}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
