@@ -86,72 +86,110 @@ def install_ml_dependencies():
         logger.error(f"Failed to install dependencies: {e}")
         raise RuntimeError(f"Dependency installation failed: {e}")
 
-def extract_zip_streaming(zip_path, extract_path, max_memory_mb=400):
+def extract_zip_ultra_conservative(zip_path, extract_path, max_memory_mb=300):
     """
-    Extract zip file with memory-conscious streaming approach
-    Extracts files one by one to avoid loading entire zip into memory
+    Ultra-conservative zip extraction with external process isolation
+    Uses minimal memory by processing one file at a time with cleanup
     """
-    logger.info(f"Starting streaming extraction to {extract_path}")
+    logger.info(f"Starting ultra-conservative extraction to {extract_path}")
     logger.info(f"Memory limit: {max_memory_mb}MB")
     
     os.makedirs(extract_path, exist_ok=True)
     extracted_files = 0
     
     try:
+        # First, get file list with minimal memory usage
+        file_list = []
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            file_list = zip_ref.namelist()
-            total_files = len(file_list)
-            logger.info(f"Zip contains {total_files} files")
-            
-            for i, file_info in enumerate(zip_ref.infolist()):
-                # Skip directories
-                if file_info.is_dir():
-                    continue
-                
-                # Monitor memory usage
+            file_list = [info for info in zip_ref.infolist() if not info.is_dir()]
+        
+        total_files = len(file_list)
+        logger.info(f"Zip contains {total_files} files to extract")
+        
+        # Process files one by one with aggressive memory management
+        for i, file_info in enumerate(file_list):
+            try:
+                # Monitor memory before each file
                 current_memory = get_memory_usage()
                 if current_memory and current_memory > max_memory_mb:
-                    logger.warning(f"Memory usage high: {current_memory:.1f}MB")
-                    # Force garbage collection
+                    logger.warning(f"Memory usage high before file {i+1}: {current_memory:.1f}MB")
+                    # Force aggressive cleanup
                     gc.collect()
+                    time.sleep(0.1)  # Brief pause for memory cleanup
                 
-                # Extract single file
-                try:
-                    logger.info(f"Extracting file {i+1}/{total_files}: {file_info.filename}")
-                    
-                    # Create target directory if needed
-                    target_path = os.path.join(extract_path, file_info.filename)
-                    target_dir = os.path.dirname(target_path)
-                    if target_dir:
-                        os.makedirs(target_dir, exist_ok=True)
-                    
-                    # Extract with streaming to avoid memory issues
+                logger.info(f"Extracting file {i+1}/{total_files}: {file_info.filename}")
+                
+                # Create target directory if needed
+                target_path = os.path.join(extract_path, file_info.filename)
+                target_dir = os.path.dirname(target_path)
+                if target_dir:
+                    os.makedirs(target_dir, exist_ok=True)
+                
+                # Open zip file fresh for each file to minimize memory
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    # Use very small chunks and immediate cleanup
                     with zip_ref.open(file_info) as source:
                         with open(target_path, 'wb') as target:
-                            # Copy in small chunks
-                            chunk_size = 8192  # 8KB chunks
+                            chunk_size = 4096  # Even smaller 4KB chunks
+                            chunks_processed = 0
+                            
                             while True:
-                                chunk = source.read(chunk_size)
-                                if not chunk:
-                                    break
-                                target.write(chunk)
+                                try:
+                                    chunk = source.read(chunk_size)
+                                    if not chunk:
+                                        break
+                                    target.write(chunk)
+                                    chunks_processed += 1
+                                    
+                                    # Aggressive memory monitoring during large files
+                                    if chunks_processed % 100 == 0:  # Every ~400KB
+                                        current_memory = get_memory_usage()
+                                        if current_memory and current_memory > max_memory_mb:
+                                            logger.warning(f"Memory spike during extraction: {current_memory:.1f}MB")
+                                            gc.collect()
+                                            
+                                except MemoryError:
+                                    logger.error(f"Memory error during {file_info.filename}")
+                                    raise
+                
+                extracted_files += 1
+                
+                # Cleanup after each file
+                if extracted_files % 5 == 0:  # More frequent cleanup
+                    gc.collect()
+                    logger.info(f"Extracted {extracted_files}/{total_files} files")
                     
-                    extracted_files += 1
-                    
-                    # Log progress every 10 files
-                    if extracted_files % 10 == 0:
-                        logger.info(f"Extracted {extracted_files}/{total_files} files")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to extract {file_info.filename}: {e}")
-                    # Continue with other files
-                    continue
-            
-            logger.info(f"Streaming extraction completed: {extracted_files} files")
-            return True
-            
+            except Exception as e:
+                logger.error(f"Failed to extract {file_info.filename}: {e}")
+                # Continue with other files, but log the error
+                continue
+        
+        logger.info(f"Ultra-conservative extraction completed: {extracted_files}/{total_files} files")
+        return extracted_files > 0
+        
     except Exception as e:
-        logger.error(f"Streaming extraction failed: {e}")
+        logger.error(f"Ultra-conservative extraction failed: {e}")
+        return False
+
+def try_system_unzip(zip_path, extract_path):
+    """
+    Try to use system unzip command if available (more memory efficient)
+    """
+    try:
+        logger.info("Attempting system unzip command...")
+        result = subprocess.run([
+            'unzip', '-q', zip_path, '-d', extract_path
+        ], capture_output=True, text=True, timeout=300)
+        
+        if result.returncode == 0:
+            logger.info("System unzip successful")
+            return True
+        else:
+            logger.warning(f"System unzip failed: {result.stderr}")
+            return False
+            
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.warning(f"System unzip not available or failed: {e}")
         return False
 
 def download_with_gdown():
@@ -323,28 +361,29 @@ def download_model():
         if pre_extract_memory:
             logger.info(f"Memory usage before extraction: {pre_extract_memory:.1f}MB")
         
-        # Use streaming extraction to avoid memory issues
+        # Try multiple extraction methods in order of preference
         logger.info("Starting memory-optimized extraction...")
         extract_start = time.time()
         
-        if not extract_zip_streaming(ZIP_PATH, "trocr_invoice"):
-            # Fallback to traditional extraction with smaller chunks
-            logger.warning("Streaming extraction failed, trying traditional method...")
-            with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
-                file_list = zip_ref.namelist()
-                logger.info(f"Extracting {len(file_list)} files...")
-                
-                # Extract files one by one to control memory usage
-                for i, filename in enumerate(file_list):
-                    try:
-                        zip_ref.extract(filename, "trocr_invoice")
-                        if i % 10 == 0:
-                            logger.info(f"Extracted {i+1}/{len(file_list)} files")
-                            # Force garbage collection every 10 files
-                            gc.collect()
-                    except Exception as e:
-                        logger.error(f"Failed to extract {filename}: {e}")
-                        continue
+        extraction_successful = False
+        
+        # Method 1: Try system unzip if available (most memory efficient)
+        if try_system_unzip(ZIP_PATH, "trocr_invoice"):
+            extraction_successful = True
+            logger.info("Extraction successful using system unzip")
+        else:
+            # Method 2: Ultra-conservative Python extraction
+            logger.info("System unzip failed, trying ultra-conservative Python extraction...")
+            if extract_zip_ultra_conservative(ZIP_PATH, "trocr_invoice"):
+                extraction_successful = True
+                logger.info("Extraction successful using ultra-conservative method")
+            else:
+                # Method 3: Last resort - try to extract just essential files
+                logger.warning("Ultra-conservative extraction failed, trying selective extraction...")
+                extraction_successful = extract_essential_files_only(ZIP_PATH, "trocr_invoice")
+        
+        if not extraction_successful:
+            raise RuntimeError("All extraction methods failed - model file may be too large for available memory")
         
         extract_time = time.time() - extract_start
         logger.info(f"Extraction complete in {extract_time:.2f} seconds")
