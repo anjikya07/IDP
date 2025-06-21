@@ -57,7 +57,7 @@ def install_ml_dependencies():
         raise RuntimeError(f"Dependency installation failed: {e}")
 
 def download_model():
-    """Download model with detailed progress logging"""
+    """Download model with better error handling and validation"""
     if os.path.exists(MODEL_DIR):
         logger.info(f"Model directory already exists: {MODEL_DIR}")
         return
@@ -65,89 +65,128 @@ def download_model():
     try:
         logger.info("=== STARTING MODEL DOWNLOAD ===")
         os.makedirs("trocr_invoice", exist_ok=True)
-        logger.info("Downloading model from Google Drive...")
-        start_time = time.time()
         
-        # Use session for better connection handling
-        with requests.Session() as session:
-            logger.info(f"Making request to: {DOWNLOAD_URL}")
-            response = session.get(DOWNLOAD_URL, stream=True, timeout=600)  # 10 min timeout
-            
-            if response.status_code != 200:
-                logger.error(f"Download failed with status code: {response.status_code}")
-                logger.error(f"Response headers: {dict(response.headers)}")
-                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
-            
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            logger.info(f"Download started, total size: {total_size} bytes ({total_size/1024/1024:.1f} MB)")
-            
-            downloaded = 0
-            chunk_count = 0
-            
-            with open(ZIP_PATH, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        chunk_count += 1
-                        
-                        # Log progress every 10MB
-                        if chunk_count % 1280 == 0:  # 1280 * 8192 ≈ 10MB
-                            if total_size > 0:
-                                percent = (downloaded / total_size) * 100
-                                logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB ({percent:.1f}%)")
-                            else:
-                                logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB")
-                        
-        download_time = time.time() - start_time
-        logger.info(f"Download complete in {download_time:.2f} seconds. File size: {os.path.getsize(ZIP_PATH)} bytes")
+        # Try multiple download URLs
+        download_urls = [
+            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&export=download",
+            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}&confirm=t",
+            f"https://drive.google.com/uc?id={DRIVE_FILE_ID}"
+        ]
         
-        # Extract with progress
-        logger.info("Starting extraction...")
-        extract_start = time.time()
+        for i, url in enumerate(download_urls):
+            try:
+                logger.info(f"Attempting download method {i+1}: {url}")
+                success = _attempt_download(url)
+                if success:
+                    break
+            except Exception as e:
+                logger.warning(f"Download method {i+1} failed: {e}")
+                if i == len(download_urls) - 1:  # Last attempt
+                    raise
+                    
+    except Exception as e:
+        logger.error(f"All download methods failed: {e}")
+        raise RuntimeError(f"Model download failed: {e}")
+
+def _attempt_download(url):
+    """Attempt to download from a specific URL"""
+    start_time = time.time()
+    
+    with requests.Session() as session:
+        logger.info(f"Making request to: {url}")
+        response = session.get(url, stream=True, timeout=600)
         
+        if response.status_code != 200:
+            logger.error(f"Download failed with status code: {response.status_code}")
+            raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
+        
+        # Check if we got an HTML page (common with Google Drive errors)
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' in content_type:
+            logger.error("Received HTML page instead of file - likely a Google Drive error page")
+            # Log first 500 chars of response for debugging
+            response_preview = response.text[:500] if hasattr(response, 'text') else "Cannot preview"
+            logger.error(f"Response preview: {response_preview}")
+            raise requests.exceptions.RequestException("Received HTML instead of file")
+        
+        total_size = int(response.headers.get('content-length', 0))
+        logger.info(f"Download started, total size: {total_size} bytes ({total_size/1024/1024:.1f} MB)")
+        
+        # Validate file size (ML models should be at least 1MB)
+        if total_size < 1024 * 1024:  # Less than 1MB
+            logger.warning(f"File size suspiciously small: {total_size} bytes")
+        
+        downloaded = 0
+        chunk_count = 0
+        
+        with open(ZIP_PATH, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    chunk_count += 1
+                    
+                    # Log progress every 10MB
+                    if chunk_count % 1280 == 0:
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB ({percent:.1f}%)")
+                        else:
+                            logger.info(f"Downloaded {downloaded/1024/1024:.1f}MB")
+    
+    download_time = time.time() - start_time
+    actual_size = os.path.getsize(ZIP_PATH)
+    logger.info(f"Download complete in {download_time:.2f} seconds. File size: {actual_size} bytes")
+    
+    # Validate the downloaded file
+    if actual_size < 1024 * 1024:  # Less than 1MB
+        logger.error(f"Downloaded file too small ({actual_size} bytes) - likely not the actual model")
+        # Try to read first few bytes to see what we got
+        with open(ZIP_PATH, 'rb') as f:
+            first_bytes = f.read(100)
+            logger.error(f"First 100 bytes: {first_bytes}")
+        raise RuntimeError("Downloaded file appears to be corrupted or incorrect")
+    
+    # Test if it's actually a zip file
+    try:
         with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
             file_list = zip_ref.namelist()
-            logger.info(f"Zip contains {len(file_list)} files")
-            zip_ref.extractall("trocr_invoice")
-            
-        extract_time = time.time() - extract_start
-        logger.info(f"Extraction complete in {extract_time:.2f} seconds")
-        
-        # Verify extraction
-        if os.path.exists(MODEL_DIR):
-            model_files = os.listdir(MODEL_DIR)
-            logger.info(f"Model directory created with {len(model_files)} files: {model_files}")
-        else:
-            logger.error(f"Model directory not found after extraction: {MODEL_DIR}")
-            raise RuntimeError("Model extraction failed - directory not created")
-        
-        # Clean up zip file
-        if os.path.exists(ZIP_PATH):
-            os.remove(ZIP_PATH)
-            logger.info("Cleanup: zip file removed")
-            
-        total_time = time.time() - start_time
-        logger.info(f"=== MODEL DOWNLOAD COMPLETED in {total_time:.2f} seconds ===")
-        
-    except requests.exceptions.Timeout:
-        logger.error("Model download timed out")
-        raise RuntimeError("Model download timed out - please try again")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to download model: {e}")
-        raise RuntimeError(f"Model download failed: {e}")
+            logger.info(f"Zip file validated - contains {len(file_list)} files")
     except zipfile.BadZipFile as e:
-        logger.error(f"Invalid zip file: {e}")
-        if os.path.exists(ZIP_PATH):
-            logger.info(f"Removing corrupted zip file: {ZIP_PATH}")
-            os.remove(ZIP_PATH)
-        raise RuntimeError(f"Model extraction failed - corrupted download: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error during model setup: {e}")
-        logger.exception("Full traceback:")
-        raise RuntimeError(f"Model setup failed: {e}")
+        logger.error(f"Downloaded file is not a valid zip: {e}")
+        # Log file contents for debugging
+        with open(ZIP_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+            content_preview = f.read(500)
+            logger.error(f"File content preview: {content_preview}")
+        raise RuntimeError(f"Downloaded file is not a valid zip file: {e}")
+    
+    # Extract the model
+    logger.info("Starting extraction...")
+    extract_start = time.time()
+    
+    with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+        file_list = zip_ref.namelist()
+        logger.info(f"Extracting {len(file_list)} files...")
+        zip_ref.extractall("trocr_invoice")
+    
+    extract_time = time.time() - extract_start
+    logger.info(f"Extraction complete in {extract_time:.2f} seconds")
+    
+    # Verify extraction
+    if os.path.exists(MODEL_DIR):
+        model_files = os.listdir(MODEL_DIR)
+        logger.info(f"Model directory created with {len(model_files)} files: {model_files}")
+    else:
+        logger.error(f"Model directory not found after extraction: {MODEL_DIR}")
+        raise RuntimeError("Model extraction failed - directory not created")
+    
+    # Clean up zip file
+    if os.path.exists(ZIP_PATH):
+        os.remove(ZIP_PATH)
+        logger.info("Cleanup: zip file removed")
+    
+    logger.info("=== MODEL DOWNLOAD COMPLETED ===")
+    return True
 
 def load_model():
     """Load model only when needed (lazy loading) with detailed logging"""
