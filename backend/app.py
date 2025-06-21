@@ -10,7 +10,7 @@ app = Flask(__name__)
 CORS(app)  
 
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file siz
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -18,9 +18,29 @@ logger = logging.getLogger(__name__)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for Render"""
+    return jsonify({
+        "status": "healthy", 
+        "service": "invoice-ocr-api",
+        "version": "1.0"
+    }), 200
+
+@app.route("/", methods=["GET"])
+def root():
+    """Root endpoint"""
+    return jsonify({
+        "message": "Invoice OCR API is running",
+        "endpoints": {
+            "process": "/api/process",
+            "health": "/health"
+        }
+    }), 200
+
 @app.route("/api/process", methods=["POST"])
 def process_document():
-    filepath = None  
+    filepath = None  # Initialize filepath variable
     
     try:
         # Check if file is in request
@@ -46,7 +66,7 @@ def process_document():
         
         logger.info(f"Processing file: {filename}")
         
-        # Extract text using OCR
+        # Extract text using OCR (model will load on first use)
         raw_text = extract_text(filepath)
         
         # Extract structured fields
@@ -64,6 +84,7 @@ def process_document():
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
         
     finally:
+        # 🧹 FILE CLEANUP CODE GOES HERE
         if filepath and os.path.exists(filepath):
             try:
                 os.remove(filepath)
@@ -84,4 +105,5 @@ def internal_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
