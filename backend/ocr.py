@@ -9,10 +9,10 @@ import torch
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use public model directly
-HF_MODEL_ID = "microsoft/trocr-base-printed"
+# Use public custom model
+HF_MODEL_ID = "anjikya07/trocr_model"
 
-# Global variables
+# Globals
 processor = None
 model = None
 device = None
@@ -33,32 +33,42 @@ def load_model():
         return
 
     try:
-        logger.info("=== LOADING PUBLIC MODEL FROM HUGGING FACE ===")
+        logger.info("=== LOADING PUBLIC MODEL ===")
         start_time = time.time()
 
         cache_dir = "/tmp/huggingface_cache"
         os.makedirs(cache_dir, exist_ok=True)
 
-        processor = TrOCRProcessor.from_pretrained(
-            HF_MODEL_ID, cache_dir=cache_dir
-        )
-        model = VisionEncoderDecoderModel.from_pretrained(
-            HF_MODEL_ID,
-            torch_dtype=torch.float32,
-            low_cpu_mem_usage=True,
-            device_map=None,
-            cache_dir=cache_dir
-        )
+        try:
+            processor = TrOCRProcessor.from_pretrained(HF_MODEL_ID, cache_dir=cache_dir)
+            model = VisionEncoderDecoderModel.from_pretrained(
+                HF_MODEL_ID,
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                device_map=None,
+                cache_dir=cache_dir
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load custom model: {e}")
+            logger.info("Falling back to microsoft/trocr-base-printed")
+            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed", cache_dir=cache_dir)
+            model = VisionEncoderDecoderModel.from_pretrained(
+                "microsoft/trocr-base-printed",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                device_map=None,
+                cache_dir=cache_dir
+            )
 
         device = torch.device("cpu")
         model.to(device)
         model.eval()
 
         gc.collect()
-        logger.info(f"Model and processor loaded in {time.time() - start_time:.2f}s")
+        logger.info(f"Model loaded in {time.time() - start_time:.2f}s")
 
     except Exception as e:
-        logger.exception("Failed to load model:")
+        logger.exception("Model loading failed")
         raise RuntimeError(f"Model initialization failed: {e}")
 
 def extract_text(filepath):
@@ -97,9 +107,9 @@ def extract_text(filepath):
         del pixel_values, generated_ids
         gc.collect()
 
-        logger.info(f"OCR finished in {time.time() - start_time:.2f}s")
+        logger.info(f"OCR done in {time.time() - start_time:.2f}s")
         return extracted_text if extracted_text.strip() else "No text could be extracted from the image"
 
     except Exception as e:
-        logger.exception("OCR extraction failed")
+        logger.exception("OCR failed")
         raise RuntimeError(f"OCR failed: {e}")
