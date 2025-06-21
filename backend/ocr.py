@@ -1,26 +1,26 @@
 import logging
 import os
-import subprocess
-import sys
 from PIL import Image
 import time
-import tempfile
 import gc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Environment-based configuration for Render
+HF_TOKEN = os.getenv('HF_TOKEN')
+if not HF_TOKEN:
+    logger.error("HF_TOKEN environment variable not set!")
+
 # Hugging Face model configuration
 HF_USERNAME = "anjikya07"
 HF_MODEL_NAME = "trocr_model"
-HF_TOKEN = "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"
 HF_MODEL_ID = f"{HF_USERNAME}/{HF_MODEL_NAME}"
 
 # Global variables for lazy loading
 processor = None
 model = None
 device = None
-dependencies_installed = False
 
 def get_memory_usage():
     """Get current memory usage for monitoring"""
@@ -32,71 +32,24 @@ def get_memory_usage():
     except ImportError:
         return None
 
-def install_ml_dependencies():
-    """Install ML dependencies only when needed"""
-    global dependencies_installed
-    
-    if dependencies_installed:
-        logger.info("ML dependencies already installed, skipping...")
-        return
-        
-    try:
-        logger.info("Installing ML dependencies...")
-        start_time = time.time()
-        
-        # Install PyTorch CPU version (much smaller)
-        logger.info("Installing PyTorch...")
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "torch", "--index-url", "https://download.pytorch.org/whl/cpu"
-        ])
-        logger.info("PyTorch installation completed")
-        
-        # Install transformers
-        logger.info("Installing transformers...")
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "transformers"
-        ])
-        logger.info("Transformers installation completed")
-        
-        # Install huggingface_hub for authentication
-        logger.info("Installing huggingface_hub...")
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "huggingface_hub"
-        ])
-        logger.info("huggingface_hub installation completed")
-        
-        # Install psutil for memory monitoring
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", "psutil"
-            ])
-            logger.info("psutil installation completed")
-        except:
-            logger.warning("psutil installation failed, memory monitoring disabled")
-        
-        dependencies_installed = True
-        elapsed = time.time() - start_time
-        logger.info(f"ML dependencies installed successfully in {elapsed:.2f} seconds")
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install dependencies: {e}")
-        raise RuntimeError(f"Dependency installation failed: {e}")
-
 def setup_huggingface_auth():
     """Setup Hugging Face authentication"""
     try:
         from huggingface_hub import login
-        logger.info("Setting up Hugging Face authentication...")
-        login(token=HF_TOKEN)
-        logger.info("Hugging Face authentication successful")
-        return True
+        if HF_TOKEN:
+            logger.info("Setting up Hugging Face authentication...")
+            login(token=HF_TOKEN)
+            logger.info("Hugging Face authentication successful")
+            return True
+        else:
+            logger.warning("No HF_TOKEN provided")
+            return False
     except Exception as e:
         logger.error(f"Hugging Face authentication failed: {e}")
         return False
 
 def load_model():
-    """Load model from Hugging Face with memory optimization"""
+    """Load model from Hugging Face optimized for Render deployment"""
     global processor, model, device
     
     if processor is not None and model is not None:
@@ -112,18 +65,18 @@ def load_model():
         if initial_memory:
             logger.info(f"Initial memory usage: {initial_memory:.1f}MB")
         
-        # First install dependencies
-        install_ml_dependencies()
-        
-        # Setup Hugging Face authentication
-        if not setup_huggingface_auth():
-            logger.warning("Authentication failed, trying without authentication...")
-        
-        # Now import the libraries (after installation)
+        # Import libraries (pre-installed from requirements.txt)
         logger.info("Importing ML libraries...")
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
         import torch
         logger.info("ML libraries imported successfully")
+        
+        # Setup Hugging Face authentication
+        setup_huggingface_auth()
+        
+        # Use /tmp for cache on Render
+        cache_dir = "/tmp/huggingface_cache"
+        os.makedirs(cache_dir, exist_ok=True)
         
         # Load processor with memory monitoring
         logger.info(f"Loading processor from Hugging Face model: {HF_MODEL_ID}")
@@ -132,46 +85,57 @@ def load_model():
             processor = TrOCRProcessor.from_pretrained(
                 HF_MODEL_ID,
                 use_auth_token=HF_TOKEN,
-                cache_dir=None  # Use default cache
+                cache_dir=cache_dir
             )
         except Exception as e:
             logger.warning(f"Failed to load custom processor, trying base TrOCR processor: {e}")
             # Fallback to base TrOCR processor if custom one fails
-            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
+            processor = TrOCRProcessor.from_pretrained(
+                "microsoft/trocr-base-printed",
+                cache_dir=cache_dir
+            )
         
         processor_time = time.time() - processor_start
-        
         processor_memory = get_memory_usage()
         if processor_memory:
             logger.info(f"Processor loaded in {processor_time:.2f} seconds, memory: {processor_memory:.1f}MB")
         else:
             logger.info(f"Processor loaded in {processor_time:.2f} seconds")
         
-        # Load model with memory optimization
+        # Load model with memory optimization for Render
         logger.info(f"Loading model from Hugging Face: {HF_MODEL_ID}")
         model_start = time.time()
         
-        # Use lower precision and memory optimization
-        model = VisionEncoderDecoderModel.from_pretrained(
-            HF_MODEL_ID,
-            use_auth_token=HF_TOKEN,
-            torch_dtype=torch.float32,
-            low_cpu_mem_usage=True,
-            device_map=None,  # Don't auto-assign device
-            cache_dir=None  # Use default cache
-        )
+        # Use lower precision and memory optimization for Render's limited resources
+        try:
+            model = VisionEncoderDecoderModel.from_pretrained(
+                HF_MODEL_ID,
+                use_auth_token=HF_TOKEN,
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                device_map=None,  # Don't auto-assign device
+                cache_dir=cache_dir
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load custom model, trying base TrOCR model: {e}")
+            model = VisionEncoderDecoderModel.from_pretrained(
+                "microsoft/trocr-base-printed",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+                device_map=None,
+                cache_dir=cache_dir
+            )
         
         model_time = time.time() - model_start
-        
         model_memory = get_memory_usage()
         if model_memory:
             logger.info(f"Model loaded in {model_time:.2f} seconds, memory: {model_memory:.1f}MB")
         else:
             logger.info(f"Model loaded in {model_time:.2f} seconds")
         
-        # Set device and move model
+        # Set device and move model (CPU only on Render free tier)
         logger.info("Setting up device...")
-        device = torch.device("cpu")  # Force CPU
+        device = torch.device("cpu")
         model.to(device)
         model.eval()
         
@@ -185,38 +149,16 @@ def load_model():
             logger.info(f"Model moved to device: {device}")
         
         total_time = time.time() - start_time
-        logger.info(f"=== MODEL LOADING FROM HUGGING FACE COMPLETED in {total_time:.2f} seconds ===")
+        logger.info(f"=== MODEL LOADING COMPLETED in {total_time:.2f} seconds ===")
         
     except Exception as e:
         logger.error(f"Failed to load model from Hugging Face: {str(e)}")
         logger.exception("Full model loading traceback:")
-        
-        # Try fallback to base TrOCR model
-        logger.info("Attempting fallback to base TrOCR model...")
-        try:
-            from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-            import torch
-            
-            processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
-            model = VisionEncoderDecoderModel.from_pretrained(
-                "microsoft/trocr-base-printed",
-                torch_dtype=torch.float32,
-                low_cpu_mem_usage=True,
-                device_map=None
-            )
-            device = torch.device("cpu")
-            model.to(device)
-            model.eval()
-            
-            logger.info("Fallback to base TrOCR model successful")
-            
-        except Exception as fallback_error:
-            logger.error(f"Fallback model loading also failed: {str(fallback_error)}")
-            raise RuntimeError(f"Model initialization failed: {str(e)}")
+        raise RuntimeError(f"Model initialization failed: {str(e)}")
 
 def extract_text(filepath):
     """
-    Extract text from image using OCR model with memory optimization
+    Extract text from image using OCR model optimized for Render
     
     Args:
         filepath (str): Path to the image file
@@ -248,7 +190,7 @@ def extract_text(filepath):
         load_model()
         logger.info("Model loaded, starting image processing...")
         
-        # Import torch here (after installation)
+        # Import torch here
         import torch
         
         # Load and validate image with memory optimization
@@ -257,8 +199,8 @@ def extract_text(filepath):
             image_start = time.time()
             image = Image.open(filepath).convert("RGB")
             
-            # Resize image if too large to save memory
-            max_size = 2048  # Maximum dimension
+            # Resize image if too large to save memory (important for Render's limited RAM)
+            max_size = 1536  # Reduced from 2048 for Render
             if max(image.size) > max_size:
                 ratio = max_size / max(image.size)
                 new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
@@ -296,15 +238,16 @@ def extract_text(filepath):
             del image
             gc.collect()
             
-            # Model inference with memory optimization
+            # Model inference with memory optimization for Render
             logger.info("Running model inference...")
             inference_start = time.time()
             with torch.no_grad():
                 generated_ids = model.generate(
                     pixel_values, 
-                    max_length=512,
-                    num_beams=2,  # Reduced from 4 to save memory
-                    early_stopping=True
+                    max_length=256,  # Reduced from 512 for faster processing
+                    num_beams=2,     # Reduced beam search for memory
+                    early_stopping=True,
+                    do_sample=False  # Deterministic output
                 )
             inference_time = time.time() - inference_start
             
@@ -347,9 +290,6 @@ def extract_text(filepath):
             
             return extracted_text
             
-        except torch.cuda.OutOfMemoryError:
-            logger.error("GPU out of memory during OCR processing")
-            raise RuntimeError("Image too large for processing. Please try a smaller image.")
         except Exception as e:
             logger.error(f"OCR model processing failed: {e}")
             logger.exception("OCR processing traceback:")
