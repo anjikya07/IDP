@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+@app.route("/favicon.ico")
+def favicon():
+    return '', 204
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint for Render"""
