@@ -9,7 +9,7 @@ import logging
 app = Flask(__name__)
 
 # ✅ Allow CORS only for your frontend
-CORS(app, resources={r"/api/*": {"origins": "https://ocr-idp.netlify.app"}})
+CORS(app, origins="*")
 
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
