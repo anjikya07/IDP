@@ -7,7 +7,7 @@ from flask_cors import CORS
 import logging
 
 app = Flask(__name__)
-CORS(app)  
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
