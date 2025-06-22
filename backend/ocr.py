@@ -40,7 +40,7 @@ def load_model():
         os.makedirs(cache_dir, exist_ok=True)
 
         try:
-            processor = TrOCRProcessor.from_pretrained(HF_MODEL_ID, cache_dir=cache_dir)
+            processor = TrOCRProcessor.from_pretrained(HF_MODEL_ID, cache_dir=cache_dir, use_fast=False)
             model = VisionEncoderDecoderModel.from_pretrained(
                 HF_MODEL_ID,
                 torch_dtype=torch.float32,
